@@ -57,18 +57,16 @@ export const Earth = forwardRef(({ userWorldPosRef }, ref) => {
         TEXTURES.clouds
     ]);
 
-    // Debug Controls for Fine Tuning
+    // Debug Controls
     const { debugLat, debugLon, debugOffset } = useControls('Ground Station Calibration', {
         debugLat: { value: 19, min: -90, max: 90, step: 0.01, label: 'Latitude' },
         debugLon: { value: 165, min: -180, max: 180, step: 0.01, label: 'Longitude' },
         debugOffset: { value: 90, min: 0, max: 360, step: 90, label: 'Texture Offset' },
     });
 
-    // Calculate Position
     const phi = (90 - debugLat) * (Math.PI / 180);
     const theta = (debugLon + debugOffset) * (Math.PI / 180);
 
-    // Push out slightly (1.01) to avoid Z-fighting with texture
     const x = -EARTH_RADIUS * 1.01 * Math.sin(phi) * Math.cos(theta);
     const z = EARTH_RADIUS * 1.01 * Math.sin(phi) * Math.sin(theta);
     const y = EARTH_RADIUS * 1.01 * Math.cos(phi);
@@ -78,10 +76,7 @@ export const Earth = forwardRef(({ userWorldPosRef }, ref) => {
     useFrame(({ clock }) => {
         const t = clock.getElapsedTime();
         if (earthRef.current) {
-            // Rotate Earth
             earthRef.current.rotation.y = t * 0.05;
-
-            // Update Marker World Position Ref (Performance optimization)
             if (markerRef.current && userWorldPosRef) {
                 markerRef.current.getWorldPosition(userWorldPosRef.current);
             }
@@ -102,24 +97,25 @@ export const Earth = forwardRef(({ userWorldPosRef }, ref) => {
                     map={map}
                     specularMap={specular}
                     normalMap={normal}
-                    specular={0x333333}
+                    specular={"#333333"}
                     shininess={5}
                 />
 
-                {/* Child Marker: Moves WITH Earth Rotation automatically */}
+                {/* Ground Station Marker */}
                 <mesh ref={markerRef} position={markerPos}>
                     <sphereGeometry args={[0.08, 16, 16]} />
-                    <meshBasicMaterial color="#ff0000" toneMapped={false} />
-                    <pointLight distance={1} intensity={10} color="red" />
+                    <meshBasicMaterial color="#00ff00" toneMapped={false} />
+                    <pointLight distance={1} intensity={5} color="#0f0" />
                 </mesh>
             </mesh>
 
+            {/* Clouds Overlay */}
             <mesh ref={cloudsRef} scale={[1.01, 1.01, 1.01]}>
                 <sphereGeometry args={[EARTH_RADIUS, 64, 64]} />
                 <meshPhongMaterial
                     map={cloudsMap}
                     transparent
-                    opacity={0.8}
+                    opacity={0.4}
                     blending={AdditiveBlending}
                     side={FrontSide}
                     depthWrite={false}

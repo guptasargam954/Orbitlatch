@@ -1,110 +1,152 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Vector3 } from 'three';
 import { Satellite, TargetedBeam } from './Satellite';
 import { generateConstellation, getSatellitePosition, calculateSignalQuality, EARTH_RADIUS } from '../utils/orbitalPhysics';
 
-export const Constellation = ({ onStatusUpdate, userWorldPosRef }) => {
+export const Constellation = ({ onStatusUpdate, onAlert, userWorldPosRef, satRefs: parentSatRefs }) => {
     const [satellites, setSatellites] = useState(() => generateConstellation(20));
-    const [connectedId, setConnectedId] = useState(null);
+    const [connectedId, setConnectedId] = useState(null); // Visual ID
+    const [telemetryId, setTelemetryId] = useState(null); // Stable ID for Telemetry
     const [spaceWeather, setSpaceWeather] = useState({ active: false, intensity: 0 });
 
-    const satRefs = useRef({});
-    const constellationGroup = useRef();
+    const localSatRefs = useRef({});
+    const satRefs = parentSatRefs || localSatRefs;
+    const lastSwitchTime = useRef(0);
+    const lastUpdate = useRef(0);
 
-    // Space Weather Logic
+    // Simulation logic (C code style)
     useEffect(() => {
         const interval = setInterval(() => {
-            if (Math.random() < 0.1) {
-                setSpaceWeather({ active: true, intensity: Math.random() });
-                setTimeout(() => setSpaceWeather({ active: false, intensity: 0 }), 3000);
+            if (Math.random() < 0.03) {
+                const intensity = Math.random() * 5.0;
+                setSpaceWeather({ active: true, intensity });
+                if (onAlert) onAlert("DANGER", "Solar storm detected - SNR degrading");
+                setTimeout(() => setSpaceWeather({ active: false, intensity: 0 }), 8000);
             }
-            if (Math.random() < 0.05) {
-                setSatellites(prev => prev.map(s =>
-                    Math.random() < 0.1 ? { ...s, status: s.status === 'failure' ? 'active' : 'failure' } : s
-                ));
+
+            setSatellites(prev => prev.map(s => {
+                let newTemp = s.temperature;
+                if (s.id === connectedId) newTemp += 0.8;
+                else newTemp = Math.max(25, newTemp - 0.2);
+
+                if (newTemp > 80 && s.status !== 'failure') {
+                    if (onAlert) onAlert("CRITICAL", "Thermal overload detected");
+                    return { ...s, status: 'failure', temperature: newTemp };
+                }
+                if (Math.random() < 0.005 && s.status !== 'failure') {
+                    if (onAlert) onAlert("CRITICAL", "Satellite failure occurred");
+                    return { ...s, status: 'failure' };
+                }
+                return { ...s, temperature: newTemp };
+            }));
+
+            // Per-second System Heartbeat Alert
+            if (onAlert) {
+                const activeId = telemetryId || connectedId;
+                onAlert("STATUS", `Heartbeat: ${activeId ? 'LINK_ACTIVE (' + activeId + ')' : 'LINK_OFFLINE'}`);
             }
-        }, 5000);
+        }, 1000);
         return () => clearInterval(interval);
-    }, []);
+    }, [connectedId, onAlert, telemetryId]);
 
     useFrame(({ clock }) => {
         const t = clock.getElapsedTime();
-
-        // Read from the Ref (Performance Optimization)
-        const currentUserPos = userWorldPosRef?.current || new Vector3(0, EARTH_RADIUS, 0);
-
+        const telemetry = [];
         let bestSat = null;
-        let bestQuality = -1;
+        let bestQuality = -Infinity;
 
-        const candidates = [];
-        const currentStats = {};
+        if (!userWorldPosRef.current || userWorldPosRef.current.lengthSq() < 1) return;
 
         satellites.forEach(sat => {
-            const ref = satRefs.current[sat.id];
-            if (!ref) return;
-
             const pos = getSatellitePosition(sat, t);
-            ref.position.copy(pos);
-            ref.lookAt(0, 0, 0);
-
-            const dist = pos.distanceTo(currentUserPos);
-            let quality = calculateSignalQuality(pos, currentUserPos);
-
-            if (spaceWeather.active) quality *= 0.5;
-            if (sat.status === 'failure') quality = 0;
-
-            const velocity = sat.speed * 1000;
-
-            currentStats[sat.id] = {
-                rssi: quality,
-                dist: dist,
-                alt: (Math.sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z) - EARTH_RADIUS) * 1000,
-                vel: 7.8,
-                latency: (dist * 0.02)
-            };
-
-            if (quality > 0 && sat.status !== 'failure') {
-                candidates.push({ id: sat.id, quality });
+            if (satRefs.current[sat.id]) {
+                satRefs.current[sat.id].position.copy(pos);
             }
 
-            if (quality > bestQuality && sat.status !== 'failure') {
-                bestQuality = quality;
+            const dist = pos.distanceTo(userWorldPosRef.current);
+            const isVisible = pos.clone().normalize().dot(userWorldPosRef.current.clone().normalize()) > 0.05;
+
+            // Calculate quality
+            const quality = calculateSignalQuality(dist, spaceWeather.active ? spaceWeather.intensity : 0);
+
+            let stateStr = sat.status === 'failure' ? 'FAILED' : 'STANDBY';
+            if (isVisible && sat.status !== 'failure') {
+                if (sat.id === telemetryId) stateStr = 'CONNECTED';
+                else stateStr = 'AVAILABLE';
+            } else if (!isVisible && sat.status !== 'failure') {
+                stateStr = 'STANDBY';
+            }
+
+            telemetry.push({
+                id: sat.id,
+                state: stateStr,
+                rssi: quality.rssi,
+                snr: quality.snr,
+                alt: 550 + (Math.random() * 2),
+                vel: 7.6,
+                latency: dist * 0.05,
+                dist: dist * 1000,
+                load: Math.floor(Math.random() * 80),
+                temp: sat.temperature,
+                rel: 0.8 + (Math.random() * 0.19),
+                up: Math.floor(t),
+                fail: 0,
+                score: (quality.rssi * 0.8) + (quality.snr * 0.2)
+            });
+
+            if (isVisible && sat.status !== 'failure' && quality.rssi > bestQuality) {
+                bestQuality = quality.rssi;
                 bestSat = sat.id;
             }
         });
 
-        const currentQ = connectedId ? (currentStats[connectedId]?.rssi || 0) : 0;
-
-        if (bestSat && bestSat !== connectedId) {
-            if (!connectedId || (bestQuality > currentQ + 10) || currentQ <= 0) {
-                setConnectedId(bestSat);
-            }
+        // 1. VISUAL CONNECTION
+        if (bestSat !== connectedId) {
+            setConnectedId(bestSat);
         }
 
-        candidates.sort((a, b) => b.quality - a.quality);
-        const nextCandidate = candidates.find(c => c.id !== connectedId);
+        // 2. TELEMETRY CONNECTION (5-second hold)
+        const canHandover = (t - lastSwitchTime.current) > 5;
+        const currentTQ = telemetryId ? (telemetry.find(s => s.id === telemetryId)?.rssi || 0) : 0;
 
-        if (onStatusUpdate) {
-            const activeStat = currentStats[connectedId] || {};
+        if (bestSat && bestSat !== telemetryId) {
+            if (!telemetryId || (canHandover && (bestQuality > currentTQ + 15 || currentTQ <= 0))) {
+                setTelemetryId(bestSat);
+                lastSwitchTime.current = t;
+                if (onAlert) {
+                    if (!telemetryId) onAlert("INFO", "User connected to satellite");
+                    else onAlert("INFO", "Predictive handover triggered");
+                }
+            }
+        } else if (!bestSat && telemetryId !== null) {
+            setTelemetryId(null);
+            if (onAlert) onAlert("WARNING", "No satellite available");
+        }
+
+        // Send updates to UI
+        if (onStatusUpdate && t - lastUpdate.current > 0.4) {
+            lastUpdate.current = t;
+            const activeStat = telemetry.find(s => s.id === (telemetryId || bestSat)) || {};
             onStatusUpdate({
-                connectedId,
-                nextId: nextCandidate ? nextCandidate.id : 'SEARCHING...',
+                connectedId: telemetryId || bestSat,
+                visualId: connectedId,
+                nextId: bestSat,
                 signalQuality: activeStat.rssi || 0,
                 weather: spaceWeather.active ? 'STORM' : 'CLEAR',
+                weatherIntensity: spaceWeather.intensity || 1.0,
                 satCount: satellites.length,
                 targetAlt: activeStat.alt || 0,
                 targetVel: activeStat.vel || 0,
                 targetLat: activeStat.latency || 0,
                 targetDist: activeStat.dist || 0,
-                userLocation: 'CALIBRATED_SITE'
+                userLocation: 'CALIBRATED_SITE',
+                telemetry: telemetry
             });
         }
     });
 
     return (
-        <group ref={constellationGroup}>
-            {/* Satellites */}
+        <group>
             {satellites.map(sat => (
                 <Satellite
                     key={sat.id}
@@ -115,8 +157,7 @@ export const Constellation = ({ onStatusUpdate, userWorldPosRef }) => {
                 />
             ))}
 
-            {/* Beam - Uses Ref Position now */}
-            {connectedId && satRefs.current[connectedId] && userWorldPosRef?.current && (
+            {connectedId && satRefs.current[connectedId] && (
                 <TargetedBeam
                     startPos={satRefs.current[connectedId].position}
                     endPos={userWorldPosRef.current}
